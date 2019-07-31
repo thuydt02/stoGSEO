@@ -59,6 +59,7 @@ double max_unfriend_weight = 1;
 
 double r_user[] = {1e-5}; //Standard derivation for user locations 
 int k_euclidean[] = {1, 2};
+double alpha_list[] = {1, 2};
 
 //for being ease to use
 
@@ -82,7 +83,6 @@ void read_dataset(){
     vertex_mappingvec = tFile::readIntFileByRow(vertex_mapping_file, ',');
     
     N = vertex_mappingvec.size(); vertex_mappingvec.clear();
-    
     M = eventlocvec.size();
   
     std::ostringstream streamN; streamN << N;           sN = streamN.str();
@@ -90,7 +90,8 @@ void read_dataset(){
     num_checkins = checkinvec.size();
     num_edges = edgevec.size();
     
-    /*
+    //-----------
+    
     int num_edges = edgevec.size();
     int num_checkins = checkinvec.size();
     
@@ -101,7 +102,7 @@ void read_dataset(){
     }
     
     for (int i = 0; i < num_edges; i++){
-        degree[edgevec[i][1]]++; degree[edgevec[i][0]]++;
+        degree[edgevec[i][1]] += 1; degree[edgevec[i][0]] += 1;;
     }
     
     int max_deg = 0;
@@ -115,7 +116,7 @@ void read_dataset(){
     }
     avg_deg = avg_deg / (2.0 * N);
     
-    std::cout <<"\nREADING datasets";
+/*    std::cout <<"\nREADING datasets";
     std::cout << ", Statistic:";
     std::cout <<"\nNum of users: N = " <<N;
     std::cout <<"\nNum_checkins = " <<num_checkins;
@@ -124,7 +125,6 @@ void read_dataset(){
     std::cout <<"\nMin_degree = " <<min_deg;
     std::cout <<"\navg_degree = " <<avg_deg;
 */
-
 }
 
 void run_euclidean_gseo(){
@@ -345,6 +345,152 @@ void run_euclidean_gseo(){
         tFile::saveIntFile(gseo.getSolution(), N, fout, '\n');
     }
 }
+void run_BRMean_gseo(){
+    
+    
+    //computing a[], b[] for user's locations
+    //u[M], v[M] for event's locations
+    
+    int count[N];
+    double sum_userx[N], sum_usery[N];
+    double a[N], b[N], r[N];
+    double u[M], v[M];
+    
+    for (int i = 0; i < N; i++) count [i] = 0;
+    
+    for (int i = 0; i < num_checkins; i++){
+        int uid = int(checkinvec[i][0] + 0.1); 
+        
+        count[uid] += 1;
+        sum_userx[uid] += checkinvec[i][2];
+        sum_usery[uid] += checkinvec[i][3];
+    }
+    
+    for (int i = 0; i < N; i++){
+        a[i] = sum_userx[i]/(double)count[i];
+        b[i] = sum_usery[i]/(double)count[i];
+    }
+    
+    for (int i = 0; i < M; i++){
+                                      //eventlocvec[i].pop_back();
+        v[i] = eventlocvec[i][1];//.back(); eventlocvec[i].pop_back();
+        u[i] = eventlocvec[i][0];//.back(); eventlocvec[i].pop_back();
+        
+    }
+    
+    // for calling gseo
+    
+    //computing the friendship weight and normalize it
+    std::vector<tPair> *E = new std::vector<tPair>[N];
+    
+    
+    for (int i = 0; i < num_edges; i++){
+        E[edgevec[i][0]].push_back(tPair(edgevec[i][1], 1)); //weight = 1
+        E[edgevec[i][1]].push_back(tPair(edgevec[i][0], 1));
+    }
+    
+    //scaling friendship weight such that for each i, sum(wij) in [0, 1], j = 1..N, i and j are friend
+    
+    double min_w = DBL_MAX;
+    double max_w = DBL_MIN;
+    
+    for (int v = 0; v < N; v++){
+        double w = 0;
+
+        for (tPair e: E[v]){
+            w += e.val;
+        }
+ 
+        if (min_w > w) min_w = w;
+        if (max_w < w) max_w = w;
+
+    }
+    
+    double range_w = max_w - min_w;
+    
+    for (int v = 0; v< N; v++)
+        E[v].clear();
+    
+    for (int i = 0; i < num_edges; i++){
+        E[edgevec[i][0]].push_back(tPair(edgevec[i][1], 1/max_w)); //weight = 1
+        E[edgevec[i][1]].push_back(tPair(edgevec[i][0], 1/max_w));
+    }
+    //end of scaling friendship weight;
+    
+    
+    
+    //min capacity of each p and max capacity of each p
+    
+    int *minp = new int[M];
+    int *maxp = new int[M];
+    
+    for (int i = 0; i < M; i++){
+        minp[i] = 1;
+        maxp[i] = N / M + num_padding_users;
+    }
+    
+
+    GSEO gseo;
+    gseo.setN(N);
+    gseo.setM(M);
+    gseo.setnum_iteration(num_iteration);
+    gseo.setlambda(lambda);
+//    gseo.setc(c);
+    gseo.setE(E);
+    gseo.setminp(minp);
+    gseo.setmaxp(maxp);
+
+    
+    
+    //computing c[N][M]
+    
+    double **c = new double* [N];
+    for (int i = 0; i < N; i++)
+        c[i] = new double [M];
+    
+    for (double k : alpha_list){
+        std::cout <<"\n------------------------------------------------------";
+        std::cout <<"\nBRMean, k = " <<k; 
+        
+        std::ostringstream streamk; streamk << k;           
+        std::string sk = streamk.str();
+    
+        for (int i = 0; i < N; i++){
+            for (int m = 0; m < M; m++){
+                double dist = pow(a[i] - u[m], 2) + pow(b[i] - v[m], 2);
+                c[i][m] = pow(dist, k/2.0);
+            }
+        }
+    //scaling c[i][m] in [0, 1]
+        double max_c = c[0][0];
+        double min_c = c[0][0];
+
+        for (int i = 0; i < N; i++)
+            for (int m = 0; m < M; m++){
+                if (max_c < c[i][m]) max_c = c[i][m];
+                if (min_c > c[i][m]) min_c = c[i][m]; 
+            }
+        double nmin_c = DBL_MAX;
+        double nmax_c = DBL_MIN;
+
+        for (int i = 0; i < N; i++)
+            for (int m = 0; m < M; m++){
+                c[i][m] = (c[i][m] - min_c)/max_c;
+                if (nmax_c < c[i][m]) nmax_c = c[i][m];
+                if (nmin_c > c[i][m]) nmin_c = c[i][m]; 
+
+            }
+
+        std::cout <<"\nMin_c = " <<nmin_c;
+        std::cout <<"\nMax_c = " <<nmax_c;
+        gseo.setc(c);
+        gseo.execute();
+        
+        std:string fout = out_folder + "z_BRMean_k" + sk + "_N" + sN + "_M" + sM + ".csv";
+        std::cout <<"\nsaving to " <<fout;
+        tFile::saveIntFile(gseo.getSolution(), N, fout, '\n');
+    }
+}
 
 void run_RndPartition(){
 
@@ -390,9 +536,10 @@ int main()
     //N = 5620; sN = "5620";
     //M = 20; sM = "20";
     //run_RndPartition();
-    run_euclidean_gseo();
+    //run_euclidean_gseo();
     //std::cout <<"\ndone";
    
+    run_BRMean_gseo();
     
     
      //clearance
